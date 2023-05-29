@@ -5,10 +5,13 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/fsnotify/fsnotify"
 )
 
 const (
@@ -16,19 +19,61 @@ const (
 	defaultFile   = ""
 	usageServer   = "Server address to bind to. Ex: localhost:4040"
 	usageFile     = "File or folder to upload. Ex: /tmp/filename.pdf OR /tmp"
+	usageMonitor  = "Keep monitoring the Path folder for changes. Ex: true"
 )
 
 func main() {
 	var path, serverAddr string
+	var monitor bool
 
 	cmd := flag.NewFlagSet("tcpClient", flag.ExitOnError)
 	cmd.StringVar(&serverAddr, "server", defaultServer, usageServer)
 	cmd.StringVar(&path, "path", defaultFile, usageFile)
+	cmd.BoolVar(&monitor, "monitor", false, usageMonitor)
 
 	err := cmd.Parse(os.Args[1:])
 	checkError(err)
 
 	upload(path, serverAddr)
+
+	if monitor {
+		watcher, err := fsnotify.NewWatcher()
+		if err != nil {
+			log.Fatal("Monitoring folder error: ", err)
+		}
+
+		defer func(watcher *fsnotify.Watcher) {
+			_ = watcher.Close()
+		}(watcher)
+
+		done := make(chan bool)
+		go func(srv string) {
+			defer close(done)
+
+			for {
+				select {
+				case event, ok := <-watcher.Events:
+					if !ok {
+						return
+					}
+					if event.Op == fsnotify.Create {
+						go upload(event.Name, srv)
+					}
+				case err, ok := <-watcher.Errors:
+					if !ok {
+						return
+					}
+					log.Println("error:", err)
+				}
+			}
+		}(serverAddr)
+
+		err = watcher.Add(path)
+		if err != nil {
+			log.Fatal(" -------------------------------------------------------------------- Add failed:", err)
+		}
+		<-done
+	}
 }
 
 func upload(path, serverAddr string) {
